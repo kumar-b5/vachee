@@ -1,0 +1,94 @@
+import pandas as pd
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+
+# Merge data
+merged_data = pd.merge(etf_comp_train, NAV_train, on=['ticker', 'date'])
+merged_data = pd.merge(merged_data, etf_prices_train, on=['ticker', 'date', 'time'])
+merged_data = pd.merge(merged_data, tsys_train, left_on=['cusip', 'date', 'time'], right_on=['cusip', 'Date', 'time'])
+
+# Feature engineering
+merged_data['date'] = pd.to_datetime(merged_data['date'])
+merged_data['day_of_week'] = merged_data['date'].dt.dayofweek
+merged_data['hour'] = pd.to_datetime(merged_data['time']).dt.hour
+
+# Convert categorical variables
+merged_data = pd.get_dummies(merged_data, columns=['ticker', 'Tenor'])
+
+# Define the spread as the target variable
+merged_data['spread'] = merged_data['ask'] - 0.5 * (merged_data['bidPrice'] + merged_data['askPrice'])
+
+# Additional features
+# 1. Spread percentage change
+merged_data['spread_pct_change'] = merged_data['spread'].pct_change()
+
+# 2. Bid-Ask spread of the ETF
+merged_data['etf_bid_ask_spread'] = merged_data['ask'] - merged_data['bid']
+
+# 3. Price difference between bid and ask of component bonds
+merged_data['bond_bid_ask_spread'] = merged_data['askPrice'] - merged_data['bidPrice']
+
+# 4. Moving average of the ETF bid-ask spread
+merged_data['etf_bid_ask_spread_ma'] = merged_data['etf_bid_ask_spread'].rolling(window=5).mean()
+
+# Technical Indicators
+# 5. Moving Averages
+merged_data['M5'] = merged_data['ask'].rolling(window=5).mean()
+merged_data['M10'] = merged_data['ask'].rolling(window=10).mean()
+merged_data['M20'] = merged_data['ask'].rolling(window=20).mean()
+
+# 6. MACD (Moving Average Convergence Divergence)
+merged_data['12_day_ema'] = merged_data['ask'].ewm(span=12, adjust=False).mean()
+merged_data['26_day_ema'] = merged_data['ask'].ewm(span=26, adjust=False).mean()
+merged_data['MACD'] = merged_data['12_day_ema'] - merged_data['26_day_ema']
+
+# 7. MACD Signal
+merged_data['MACD_signal'] = merged_data['MACD'].ewm(span=9, adjust=False).mean()
+
+# Price-to-NAV Ratios
+# 8. Price-to-NAV Ratio for ETF
+merged_data['price_to_nav_etf'] = merged_data['ask'] / merged_data['askNav']
+
+# 9. Price-to-NAV Ratio for Bonds
+merged_data['price_to_nav_bond'] = merged_data['askPrice'] / merged_data['askNav']
+
+# Train a RandomForestRegressor
+features = ['day_of_week', 'hour', 'askNav', 'bidNAV', 'bidPrice', 'askPrice',
+            'spread_pct_change', 'etf_bid_ask_spread', 'bond_bid_ask_spread', 'etf_bid_ask_spread_ma',
+            'M5', 'M10', 'M20', 'MACD', 'MACD_signal', 'price_to_nav_etf', 'price_to_nav_bond']
+target = 'spread'
+
+X_train, X_test, y_train, y_test = train_test_split(merged_data[features], merged_data[target], test_size=0.2, random_state=42)
+
+model = RandomForestRegressor()
+model.fit(X_train, y_train)
+
+# Make predictions on the test set
+predictions = model.predict(X_test)
+
+# Evaluate the model
+mse = mean_squared_error(y_test, predictions)
+print(f'Mean Squared Error: {mse}')
+
+# Generate signals based on predictions
+merged_data['predicted_spread'] = model.predict(merged_data[features])
+
+# Define trading signals based on a threshold
+threshold = 0.1
+merged_data['signal'] = 0
+merged_data.loc[merged_data['predicted_spread'] > threshold, 'signal'] = 1
+merged_data.loc[merged_data['predicted_spread'] < -threshold, 'signal'] = -1
+
+# Trading strategy
+position = 0
+for index, row in merged_data.iterrows():
+    if row['signal'] == 1 and position != 1:
+        print(f"Buy ETF at {row['ask']}")
+        position = 1
+    elif row['signal'] == -1 and position != -1:
+        print(f"Sell ETF at {row['bid']}")
+        position = -1
+    elif row['signal'] == 0 and position != 0:
+        print("Close position")
+        position = 0
